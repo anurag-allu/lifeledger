@@ -1,7 +1,13 @@
-
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import AuthGuard from "@/components/AuthGuard";
+import { createClient } from "@/lib/supabase/client";
+import {
+  createTransaction,
+  getTransactions,
+  deleteTransaction,
+} from "@/lib/transactions";
 
 type Transaction = {
   id: number;
@@ -10,13 +16,6 @@ type Transaction = {
   amount: number;
   date: string;
 };
-
-const initialTransactions: Transaction[] = [
-  { id: 1, name: "Monthly salary", category: "Income", amount: 4200, date: "2026-10-15" },
-  { id: 2, name: "Apartment rent", category: "Housing", amount: -1250, date: "2026-10-12" },
-  { id: 3, name: "Grocery shopping", category: "Food", amount: -86.5, date: "2026-10-11" },
-  { id: 4, name: "Internet bill", category: "Utilities", amount: -65, date: "2026-10-09" },
-];
 
 const categories = [
   "Housing",
@@ -41,9 +40,10 @@ const dateLabel = (value: string) =>
     day: "numeric",
   });
 
-export default function Home() {
-  const [transactions, setTransactions] = useState<Transaction[]>(initialTransactions);
+function Dashboard() {
+  const [transactions, setTransactions] = useState<Transaction[]>([]);
   const [loaded, setLoaded] = useState(false);
+  const [dataError, setDataError] = useState("");
   const [name, setName] = useState("");
   const [amount, setAmount] = useState("");
   const [type, setType] = useState<"income" | "expense">("expense");
@@ -51,39 +51,54 @@ export default function Home() {
   const [search, setSearch] = useState("");
   const [filter, setFilter] = useState("All");
   const [currentMonth, setCurrentMonth] = useState("");
+  const [supabase] = useState(() => createClient());
 
-  useEffect(() => {
+  async function handleLogout() {
+    const { error } = await supabase.auth.signOut();
+
+    if (error) {
+      window.alert(`Unable to sign out: ${error.message}`);
+      return;
+    }
+
+    window.location.replace("/login");
+  }
+
+
+  
+useEffect(() => {
+  let active = true;
+
+  async function loadTransactions() {
     try {
-      const saved = localStorage.getItem("lifeledger-transactions");
-      if (saved) {
-        const parsed: unknown = JSON.parse(saved);
-        if (
-          Array.isArray(parsed) &&
-          parsed.every(
-            (item) =>
-              item &&
-              typeof item.id === "number" &&
-              typeof item.name === "string" &&
-              typeof item.category === "string" &&
-              typeof item.amount === "number" &&
-              typeof item.date === "string"
-          )
-        ) {
-          // eslint-disable-next-line react-hooks/set-state-in-effect
-setTransactions(parsed as Transaction[]);
-        }
-      }
-    } catch {
-      // Keep the sample transactions if saved data cannot be read.
-    }
-    setLoaded(true);
-  }, []);
+      const data = await getTransactions();
 
-  useEffect(() => {
-    if (loaded) {
-      localStorage.setItem("lifeledger-transactions", JSON.stringify(transactions));
+      if (active) {
+        setTransactions(data);
+        setDataError("");
+      }
+    } catch (error) {
+      if (active) {
+        setDataError(
+          error instanceof Error
+            ? error.message
+            : "Unable to load transactions."
+        );
+      }
+    } finally {
+      if (active) {
+        setLoaded(true);
+      }
     }
-  }, [transactions, loaded]);
+  }
+
+  void loadTransactions();
+
+  return () => {
+    active = false;
+  };
+}, []);
+
 
   const income = transactions
     .filter((item) => item.amount > 0)
@@ -125,43 +140,98 @@ setTransactions(parsed as Transaction[]);
     return matchesSearch && matchesFilter;
   });
 
-  function addTransaction(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  
+async function addTransaction(
+  event: React.FormEvent<HTMLFormElement>
+) {
+  event.preventDefault();
 
-    const value = Number(amount);
-    if (!name.trim() || !Number.isFinite(value) || value <= 0) return;
+  const value = Number(amount);
 
-    const today = new Date();
-    const localDate = [
-      today.getFullYear(),
-      String(today.getMonth() + 1).padStart(2, "0"),
-      String(today.getDate()).padStart(2, "0"),
-    ].join("-");
+  if (!name.trim() || !Number.isFinite(value) || value <= 0) {
+    return;
+  }
 
-    const newTransaction: Transaction = {
-      id: Date.now(),
+  const today = new Date();
+
+  const localDate = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0"),
+  ].join("-");
+
+  try {
+    const savedTransaction = await createTransaction({
       name: name.trim(),
       category: type === "income" ? "Income" : category,
       amount: type === "income" ? value : -value,
       date: localDate,
-    };
+    });
 
-    setTransactions((current) => [newTransaction, ...current]);
+    setTransactions((current) => [
+      savedTransaction,
+      ...current,
+    ]);
+
     setName("");
     setAmount("");
+    setDataError("");
+  } catch (error) {
+    console.error("Failed to save transaction:", error);
+    setDataError(
+      error instanceof Error
+        ? error.message
+        : "Unable to save transaction. Please try again."
+    );
   }
+}
+  async function handleDeleteTransaction(id: number) {
+    const confirmed = window.confirm(
+      "Are you sure you want to delete this transaction?"
+    );
+
+    if (!confirmed) return;
+
+    try {
+      await deleteTransaction(id);
+
+      setTransactions((current) =>
+        current.filter((transaction) => transaction.id !== id)
+      );
+
+      setDataError("");
+    } catch (error) {
+      setDataError(
+        error instanceof Error
+          ? error.message
+          : "Unable to delete transaction."
+      );
+    }
+  }
+
   useEffect(() => {
-  // eslint-disable-next-line react-hooks/set-state-in-effect
-  setCurrentMonth(
-    new Date().toLocaleDateString("en-US", {
-      month: "long",
-      year: "numeric",
-    })
-  );
-}, []);
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCurrentMonth(
+      new Date().toLocaleDateString("en-US", {
+        month: "long",
+        year: "numeric",
+      })
+    );
+  }, []);
 
   return (
     <main className="min-h-screen bg-[#f6f8f7] text-slate-900">
+      {!loaded && (
+        <p className="p-4 text-center text-slate-500">
+          Loading your transactions...
+        </p>
+      )}
+
+      {dataError && (
+        <p role="alert" className="p-4 text-center text-red-600">
+          {dataError}
+        </p>
+      )}
       <div className="mx-auto max-w-7xl px-4 py-6 sm:px-6 lg:px-10 lg:py-10">
         <header className="mb-10 flex flex-wrap items-center justify-between gap-5">
           <div className="flex items-center gap-3">
@@ -179,6 +249,14 @@ setTransactions(parsed as Transaction[]);
             <span className="h-2 w-2 rounded-full bg-emerald-500" />
             Personal finance
           </div>
+
+          <button
+            type="button"
+            onClick={handleLogout}
+            className="rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 shadow-sm transition hover:bg-red-50 hover:text-red-600"
+          >
+            Sign Out
+          </button>
         </header>
 
         <section className="mb-8 flex flex-col justify-between gap-4 sm:flex-row sm:items-end">
@@ -332,22 +410,20 @@ setTransactions(parsed as Transaction[]);
               <button
                 type="button"
                 onClick={() => setType("expense")}
-                className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
-                  type === "expense"
+                className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${type === "expense"
                     ? "bg-white text-slate-900 shadow-sm"
                     : "text-slate-500 hover:text-slate-900"
-                }`}
+                  }`}
               >
                 Expense
               </button>
               <button
                 type="button"
                 onClick={() => setType("income")}
-                className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${
-                  type === "income"
+                className={`rounded-lg px-3 py-2.5 text-sm font-semibold transition ${type === "income"
                     ? "bg-white text-slate-900 shadow-sm"
                     : "text-slate-500 hover:text-slate-900"
-                }`}
+                  }`}
               >
                 Income
               </button>
@@ -418,7 +494,7 @@ setTransactions(parsed as Transaction[]);
               + Add transaction
             </button>
             <p className="mt-3 text-center text-xs text-slate-400">
-              Stored in this browser for now
+              Saved securely to your account in Supabase
             </p>
           </form>
 
@@ -463,11 +539,10 @@ setTransactions(parsed as Transaction[]);
                 >
                   <div className="flex min-w-0 items-center gap-3">
                     <div
-                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-lg ${
-                        item.amount > 0
+                      className={`flex h-11 w-11 shrink-0 items-center justify-center rounded-2xl text-lg ${item.amount > 0
                           ? "bg-emerald-50 text-emerald-700"
                           : "bg-slate-100 text-slate-600"
-                      }`}
+                        }`}
                     >
                       {item.amount > 0 ? "↙" : "↗"}
                     </div>
@@ -480,14 +555,47 @@ setTransactions(parsed as Transaction[]);
                       </p>
                     </div>
                   </div>
-                  <p
-                    className={`shrink-0 text-sm font-bold ${
-                      item.amount > 0 ? "text-emerald-700" : "text-slate-800"
-                    }`}
-                  >
-                    {item.amount > 0 ? "+" : "−"}
-                    {money(Math.abs(item.amount))}
-                  </p>
+                  
+
+                  <div className="flex shrink-0 items-center gap-3">
+                    <p
+                      className={`text-sm font-bold ${
+                        item.amount > 0
+                          ? "text-emerald-700"
+                          : "text-slate-800"
+                      }`}
+                    >
+                      {item.amount > 0 ? "+" : "−"}
+                      {money(Math.abs(item.amount))}
+                    </p>
+
+                    <button
+                      type="button"
+                      onClick={() => handleDeleteTransaction(item.id)}
+                      aria-label={`Delete ${item.name}`}
+                      title="Delete transaction"
+                      className="rounded-lg p-2 text-slate-400 transition hover:bg-red-50 hover:text-red-600 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-red-600"
+                    >
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        width="18"
+                        height="18"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
+                        <path d="M3 6h18" />
+                        <path d="M8 6V4h8v2" />
+                        <path d="M19 6l-1 14H6L5 6" />
+                        <path d="M10 10v6" />
+                        <path d="M14 10v6" />
+                      </svg>
+                    </button>
+                  </div>
                 </div>
               ))}
 
@@ -510,5 +618,13 @@ setTransactions(parsed as Transaction[]);
         </footer>
       </div>
     </main>
+  );
+}
+
+export default function Home() {
+  return (
+    <AuthGuard>
+      <Dashboard />
+    </AuthGuard>
   );
 }
